@@ -202,8 +202,8 @@ Now, switch to your **HPC cluster** terminal or compute environment where Singul
 Prevent quota issues on `$HOME` by pointing temporary extraction and cache folders to fast cluster scratch space:
 
 ```bash
-export SINGULARITY_CACHEDIR=$SCRATCH/.singularity/cache
-export SINGULARITY_TMPDIR=$SCRATCH/.singularity/tmp
+export SINGULARITY_TMPDIR=/ibex/user/$USER/tmpdir
+export SINGULARITY_CACHEDIR=/ibex/user/$USER/cachedir
 
 mkdir -p "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
 ```
