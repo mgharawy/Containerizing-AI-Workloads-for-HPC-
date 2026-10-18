@@ -32,9 +32,13 @@ mkdir -p "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
 
 Singularity can directly ingest images from OCI-compliant registries (such as NVIDIA NGC, Docker Hub, or GitHub Container Registry) using the `docker://` transport URI.
 
+Follow the steps at [this page](https://docs.hpc.kaust.edu.sa/soft_env/prog_env/containers/registries.html#creating-an-account-on-ngc) to create an NGC account and link the API key to KSL systems.
+
 Execute the following command to download the NGC PyTorch container:
 
 ```bash
+module load singularity
+
 singularity pull pytorch_24.08.sif docker://nvcr.io/nvidia/pytorch:24.08-py3
 ```
 
