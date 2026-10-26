@@ -1,6 +1,6 @@
 # Exercise 5: Convert to Singularity Format & Author SIF Definitions
 
-**Estimated Duration:** 35 minutes  
+**Estimated Duration:** 35 minutes
 **Prerequisites:**
 * Completed Exercises 2 and 3 (local Docker images built and tagged).
 * Access to a Linux workstation or HPC cluster with Singularity (or Apptainer) installed.
@@ -81,7 +81,7 @@ Use this when your image is pushed to a remote registry (Docker Hub, Quay, GHCR,
 singularity pull custom-ml.sif docker://username/custom-ml-stack:1.0
 ```
 
-*Pros:* Simplest workflow; automated on HPC login nodes.  
+*Pros:* Simplest workflow; automated on HPC login nodes.
 *Cons:* Requires high-bandwidth internet connectivity on the cluster.
 
 ---
@@ -141,122 +141,23 @@ A Singularity definition file consists of a **Header** defining the base system,
 └────────────────────────────────────────────────────────┘
 ```
 
-### Writing a Production AI/ML Definition File
+### A Production AI/ML Definition File
 
-Create a workspace directory and draft `pytorch_lab.def`:
+Run the commands in Sections 3–6 from this directory (`exercises/ex5`), which contains the definition files and test script.
 
-```bash
-mkdir -p ~/singularity-def-lab && cd ~/singularity-def-lab
-```
+Open [`pytorch_lab.def`](pytorch_lab.def) and walk through each section:
+* **Header:** Bootstraps from `nvidia/cuda:12.4.1-runtime-ubuntu22.04` on Docker Hub.
+* **`%labels`:** Author, version, and description metadata.
+* **`%environment`:** Locale, `PATH` to the `/opt/venv` virtualenv, unbuffered Python output, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+* **`%files`:** Copies `test_workload.py` from the host into `/app`.
+* **`%post`:** Installs Python, creates `/opt/venv`, installs CUDA-enabled PyTorch plus `transformers`, `datasets`, `accelerate`, and `scikit-learn`, then strips test suites and bytecode to shrink the SquashFS image.
+* **`%runscript`:** Prints a banner and runs `/app/test_workload.py`, forwarding any arguments.
+* **`%test`:** Fails the build if PyTorch cannot be imported.
+* **`%help`:** Usage text shown by `singularity run-help`.
 
-Write the following definition file:
+### The Accompanying Script ([`test_workload.py`](test_workload.py))
 
-```singularity
-Bootstrap: docker
-From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
-
-%labels
-    Author WorkshopPresenter
-    Version 1.0.0
-    Description Native Singularity image for PyTorch with CUDA 12.4
-
-%environment
-    # These variables are automatically sourced when the container starts
-    export LC_ALL=C.UTF-8
-    export LANG=C.UTF-8
-    export PATH=/opt/venv/bin:$PATH
-    export PYTHONUNBUFFERED=1
-    # Prevent PyTorch from allocating all visible CUDA memory immediately
-    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-%files
-    # Copy host test script into the container rootfs during build
-    # Syntax: <source_host> <destination_container>
-    ./test_workload.py /app/test_workload.py
-
-%post
-    # This section executes as root inside an isolated build chroot
-    export DEBIAN_FRONTEND=noninteractive
-
-    # 1. Install base utilities
-    apt-get update && apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        python3-venv \
-        ca-certificates \
-        curl \
-        git \
-        && rm -rf /var/lib/apt/lists/*
-
-    # 2. Setup isolated virtual environment
-    python3 -m venv /opt/venv
-    export PATH="/opt/venv/bin:$PATH"
-
-    # 3. Upgrade pip and build tools
-    pip install --no-cache-dir --upgrade pip setuptools wheel
-
-    # 4. Install CUDA-enabled PyTorch and scientific stack
-    pip install --no-cache-dir \
-        torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-    pip install --no-cache-dir \
-        transformers \
-        datasets \
-        accelerate \
-        scikit-learn
-
-    # 5. Clean up temporary files to minimize SquashFS image size
-    find /opt/venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
-    find /opt/venv -type f -name "*.pyc" -delete
-
-%runscript
-    # Executed when running `singularity run <image.sif>`
-    echo "========================================================"
-    echo "  Running Workload inside Native Singularity Container  "
-    echo "========================================================"
-    exec python3 /app/test_workload.py "$@"
-
-%test
-    # Post-build validation: if this exits non-zero, the build fails
-    export PATH="/opt/venv/bin:$PATH"
-    echo "Validating PyTorch and CUDA bindings..."
-    python3 -c "import torch; assert torch.__version__ != '', 'PyTorch missing'"
-    echo "Build validation successful!"
-
-%help
-    This container provides a GPU-ready PyTorch 2.4+ environment.
-    To execute the default workload:
-        singularity run --nv pytorch_lab.sif
-    To launch a bash shell:
-        singularity shell --nv pytorch_lab.sif
-```
-
-### Create the Accompanying Script (`test_workload.py`)
-
-Create the test script referenced in the `%files` section:
-
-```python
-cat << 'EOF' > test_workload.py
-import sys
-import torch
-
-print(f"Python Executable : {sys.executable}")
-print(f"PyTorch Version   : {torch.__version__}")
-print(f"CUDA Available    : {torch.cuda.is_available()}")
-
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    print(f"Active Device     : {torch.cuda.get_device_name(0)}")
-    x = torch.randn(2048, 2048, device=device)
-    y = torch.matmul(x, x)
-    print(f"Matrix Multiply   : SUCCESS (GPU Result Norm: {torch.norm(y):.2f})")
-else:
-    print("Warning: CUDA not active. Running on CPU.")
-    x = torch.randn(512, 512)
-    y = torch.matmul(x, x)
-    print(f"Matrix Multiply   : SUCCESS (CPU Result Norm: {torch.norm(y):.2f})")
-EOF
-```
+The test script referenced in the `%files` section. It prints the Python executable, PyTorch version, and CUDA availability, then runs a matrix multiplication on the GPU (or on the CPU as a fallback).
 
 ---
 
@@ -264,42 +165,9 @@ EOF
 
 Just like Docker, modern Singularity supports multi-stage builds directly within definition files using the `Stage:` keyword. This completely separates build tools from the final runtime image.
 
-Inspect this example of a multi-stage definition:
-
-```singularity
-# ====================================================================
-# Stage 1: Build & Compilation
-# ====================================================================
-Bootstrap: docker
-From: nvidia/cuda:12.4.1-devel-ubuntu22.04
-Stage: build
-
-%post
-    apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv python3-dev build-essential git
-    
-    python3 -m venv /opt/venv
-    export PATH="/opt/venv/bin:$PATH"
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
-
-# ====================================================================
-# Stage 2: Minimal Production Runtime
-# ====================================================================
-Bootstrap: docker
-From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
-Stage: final
-
-# Copy ONLY the virtualenv from the build stage
-%files from build
-    /opt/venv /opt/venv
-
-%environment
-    export PATH="/opt/venv/bin:$PATH"
-    export LC_ALL=C.UTF-8
-
-%runscript
-    exec python3 "$@"
-```
+Inspect the example multi-stage definition in [`pytorch_multistage.def`](pytorch_multistage.def):
+* **Stage `build`:** Starts from the CUDA `devel` image, installs compilers and Python headers, and installs PyTorch into `/opt/venv`.
+* **Stage `final`:** Starts from the slim CUDA `runtime` image and copies **only** `/opt/venv` from the build stage via `%files from build`.
 
 ---
 

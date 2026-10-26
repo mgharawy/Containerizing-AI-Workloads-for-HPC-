@@ -1,4 +1,4 @@
-# Exercise 2: Build a Custom AI/ML Container with Podman
+# Exercise 2: Build a Custom AI/ML Container with Docker
 
 **Prerequisites:**
 * A local development machine or VM with Docker installed.
@@ -26,97 +26,20 @@ In production AI/ML workflows across HPC clusters, development and runtime envir
 
 ---
 
-## Step 1: Write the Verification Script and Dockerfile
+## Step 1: Review the Verification Script and Dockerfile
 
-Create a dedicated workspace directory on your development machine:
+This exercise directory contains the two build inputs. Run all commands in Steps 1–3 from this directory (`exercises/ex2`) on your development machine.
 
-```bash
-mkdir -p ~/ml-docker-lab && cd ~/ml-docker-lab
-```
+### 1.1 The Verification Script ([`verify_ml.py`](verify_ml.py))
 
-### 1.1 Create the Verification Script (`verify_ml.py`)
+Reports the Python, PyTorch, and Transformers versions, checks whether CUDA is available, and runs a small matrix multiplication on the GPU (or on the CPU as a fallback).
 
-Create a script to verify that PyTorch, CUDA bindings, and Hugging Face libraries are functional:
+### 1.2 The [`Dockerfile`](Dockerfile)
 
-```bash
-cat << 'EOF' > verify_ml.py
-import sys
-import torch
-import transformers
-
-print("=" * 55)
-print("       AI/ML Container Self-Check Report")
-print("=" * 55)
-print(f"Python Version    : {sys.version.split()[0]}")
-print(f"PyTorch Version   : {torch.__version__}")
-print(f"Transformers Ver  : {transformers.__version__}")
-print(f"CUDA Available    : {torch.cuda.is_available()}")
-
-if torch.cuda.is_available():
-    print(f"Device Name       : {torch.cuda.get_device_name(0)}")
-    print(f"Device Capability : {torch.cuda.get_device_capability(0)}")
-    # Run a simple tensor matrix multiplication on GPU
-    a = torch.rand(1000, 1000, device="cuda")
-    b = torch.matmul(a, a)
-    print(f"GPU Matmul Test   : PASSED (Tensor Norm: {torch.norm(b):.2f})")
-else:
-    print("Device Mode       : CPU Mode (CUDA not initialized)")
-    a = torch.rand(500, 500)
-    b = torch.matmul(a, a)
-    print(f"CPU Matmul Test   : PASSED (Tensor Norm: {torch.norm(b):.2f})")
-print("=" * 55)
-EOF
-```
-
-### 1.2 Write the `Dockerfile`
-
-Create a `Dockerfile` based on NVIDIA's official CUDA runtime image on Ubuntu 22.04:
-
-```dockerfile
-cat << 'EOF' > Dockerfile
-# Stage 1: Base CUDA runtime image on Ubuntu 22.04
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
-
-# Prevent interactive prompts during apt installation
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
-
-# Install Python and core OS utilities
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-dev \
-    git \
-    curl \
-    ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip and install wheel utilities
-RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
-
-# Install PyTorch built for CUDA 12.4
-RUN python3 -m pip install --no-cache-dir \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-# Install common ML dependencies
-RUN python3 -m pip install --no-cache-dir \
-    transformers \
-    accelerate \
-    datasets \
-    scikit-learn \
-    tqdm
-
-# Set workspace and embed the verification script
-WORKDIR /app
-COPY verify_ml.py /app/verify_ml.py
-
-# Default execution entrypoint
-CMD ["python3", "/app/verify_ml.py"]
-EOF
-```
+Based on NVIDIA's official CUDA runtime image on Ubuntu 22.04 (`nvidia/cuda:12.4.1-runtime-ubuntu22.04`), it:
+* Installs Python and core OS utilities, then purges the apt cache.
+* Installs PyTorch built for CUDA 12.4, plus `transformers`, `accelerate`, `datasets`, `scikit-learn`, and `tqdm`.
+* Copies `verify_ml.py` into `/app` and sets it as the default `CMD`.
 
 ---
 

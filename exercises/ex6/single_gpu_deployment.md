@@ -23,94 +23,17 @@ In this exercise, you will:
 
 ## 1. Prepare the AI/ML Test Workload
 
-Create a workspace directory on your scratch filesystem:
+Copy the exercise files into a workspace directory on your scratch filesystem (run from this directory, `exercises/ex6`):
 
 ```bash
-mkdir -p /ibex/user/$USER/slurm_gpu_lab && cd /ibex/user/$USER/slurm_gpu_lab
+mkdir -p /ibex/user/$USER/slurm_gpu_lab
+cp train_benchmark.py submit_gpu.slurm /ibex/user/$USER/slurm_gpu_lab/
+cd /ibex/user/$USER/slurm_gpu_lab
 ```
 
-### Create the Training Benchmark Script (`train_benchmark.py`)
+### The Training Benchmark Script ([`train_benchmark.py`](train_benchmark.py))
 
-This script performs synthetic tensor operations and a short training loop, logging GPU device properties, memory allocation, and training throughput.
-
-```bash
-cat << 'EOF' > train_benchmark.py
-import os
-import sys
-import time
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
-def print_separator(title=""):
-    print(f"\n{'=' * 20} {title} {'=' * 20}")
-
-print_separator("Environment & Hardware Diagnostics")
-print(f"Host Hostname           : {os.uname().nodename}")
-print(f"Slurm Job ID            : {os.getenv('SLURM_JOB_ID', 'N/A')}")
-print(f"Python Binary           : {sys.executable}")
-print(f"PyTorch Version         : {torch.__version__}")
-print(f"CUDA Available          : {torch.cuda.is_available()}")
-print(f"CUDA_VISIBLE_DEVICES    : {os.getenv('CUDA_VISIBLE_DEVICES', 'Unset')}")
-
-if not torch.cuda.is_available():
-    print("\n[ERROR] CUDA is not available to PyTorch. Exiting.")
-    sys.exit(1)
-
-device_id = 0
-device_name = torch.cuda.get_device_name(device_id)
-device_capability = torch.cuda.get_device_capability(device_id)
-total_mem_gb = torch.cuda.get_device_properties(device_id).total_memory / (1024 ** 3)
-
-print(f"Active GPU Device       : [{device_id}] {device_name}")
-print(f"Compute Capability      : {device_capability[0]}.{device_capability[1]}")
-print(f"Total Dedicated Memory  : {total_mem_gb:.2f} GB")
-
-print_separator("Running Synthetic Neural Network Benchmark")
-# Define a multi-layer perceptron
-model = nn.Sequential(
-    nn.Linear(8192, 4096),
-    nn.ReLU(),
-    nn.Linear(4096, 2048),
-    nn.ReLU(),
-    nn.Linear(2048, 10)
-).to("cuda")
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-# Synthetic batch parameters
-batch_size = 256
-num_batches = 100
-print(f"Batch Size: {batch_size} | Iterations: {num_batches}")
-
-start_time = time.time()
-for step in range(1, num_batches + 1):
-    inputs = torch.randn(batch_size, 8192, device="cuda")
-    labels = torch.randint(0, 10, (batch_size,), device="cuda")
-
-    optimizer.zero_grad()
-    outputs = model(inputs)
-    loss = criterion(outputs, labels)
-    loss.backward()
-    optimizer.step()
-
-    if step % 25 == 0 or step == num_batches:
-        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-        print(f"Step [{step:03d}/{num_batches:03d}] - Loss: {loss.item():.4f} | "
-              f"VRAM Allocated: {allocated:.1f} MB | VRAM Reserved: {reserved:.1f} MB")
-
-elapsed = time.time() - start_time
-throughput = (num_batches * batch_size) / elapsed
-
-print_separator("Benchmark Summary")
-print(f"Total Elapsed Time      : {elapsed:.2f} s")
-print(f"Training Throughput     : {throughput:.2f} samples/s")
-print(f"Peak VRAM Usage         : {torch.cuda.max_memory_allocated() / (1024 ** 2):.1f} MB")
-print("Job execution completed successfully.\n")
-EOF
-```
+This script performs synthetic tensor operations and a short training loop, logging GPU device properties, memory allocation, and training throughput. It exits with an error if CUDA is not available.
 
 ---
 
@@ -133,67 +56,13 @@ To prevent this:
 * Pass `--bind /dev/shm` to grant the container access to host shared memory.
 * Pass `--bind /ibex/user/$USER:/ibex/user/$USER` so the container can read data and write checkpoint files directly to high-performance storage.
 
-### 2.3 Create `submit_gpu.slurm`
+### 2.3 The Batch Script ([`submit_gpu.slurm`](submit_gpu.slurm))
 
-```bash
-cat << 'EOF' > submit_gpu.slurm
-#!/bin/bash
-#SBATCH --job-name=singularity_single_gpu
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --gpus=1
-#SBATCH --mem=16G
-#SBATCH --time=00:15:00
-
-# Exit script immediately on non-zero command failure
-set -eo pipefail
-
-echo "=========================================================="
-echo "Job Execution Started: $(date)"
-echo "Node Allocated: $(hostname)"
-echo "Assigned GPU Index: ${CUDA_VISIBLE_DEVICES}"
-echo "=========================================================="
-
-# 1. Load Singularity / Apptainer module (site-specific; adjust if needed)
-module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true
-
-# 2. Define Image and Data Paths
-SIF_IMAGE="/ibex/user/$USER/slurm_gpu_lab/pytorch_24.08.sif"
-WORK_DIR="/ibex/user/$USER/slurm_gpu_lab"
-
-# Ensure image exists before execution
-if [ ! -f "${SIF_IMAGE}" ]; then
-    echo "[ERROR] SIF container image not found at ${SIF_IMAGE}"
-    exit 1
-fi
-
-# 3. Configure temporary cache locations
-export SINGULARITY_CACHEDIR="/ibex/user/$USER/.singularity/cache"
-export SINGULARITY_TMPDIR="/ibex/user/$USER/.singularity/tmp"
-
-# 4. Launch Containerized Workload
-# Flags explained:
-#   --nv            : Injects host NVIDIA driver libraries and CUDA devices
-#   --cleanenv      : Prevents host user environment contamination inside the container
-#   --bind          : Mounts host directories into container filesystem
-#   --pwd           : Sets the starting directory inside the container
-srun singularity exec \
-    --nv \
-    --cleanenv \
-    --bind /dev/shm:/dev/shm \
-    --bind ${WORK_DIR}:${WORK_DIR} \
-    --pwd ${WORK_DIR} \
-    ${SIF_IMAGE} \
-    python3 train_benchmark.py
-
-echo "=========================================================="
-echo "Job Execution Finished: $(date)"
-echo "=========================================================="
-EOF
-```
+The script requests 1 node, 1 task, 4 CPUs, 1 GPU, 16 GB of RAM, and 15 minutes, then:
+1. Loads the Singularity (or Apptainer) module.
+2. Checks that the SIF image exists at `SIF_IMAGE`.
+3. Points the Singularity cache and temp directories to scratch.
+4. Launches `train_benchmark.py` with `srun singularity exec`, using `--nv` (host NVIDIA drivers), `--cleanenv` (no host environment leakage), `--bind` for `/dev/shm` and the work directory, and `--pwd` to set the starting directory.
 
 > **Note:** If your SIF image is located in a different directory (such as where you pulled it in Exercise 1), adjust the `SIF_IMAGE` variable in `submit_gpu.slurm` accordingly.
 
@@ -316,7 +185,7 @@ If the run succeeded cleanly, this file will be empty or will only contain stand
 ### Failure Mode 2: CUDA Driver Compatibility Mismatch
 * **Symptom:**
   ```text
-  RuntimeError: The NVIDIA driver on your system is too old (found version 11080) 
+  RuntimeError: The NVIDIA driver on your system is too old (found version 11080)
   and does not support CUDA 12.4. Please update your driver.
   ```
 * **Root Cause:** The host kernel module (`nvidia.ko`) is running an older driver version than required by the CUDA toolkit bundled in the container.
@@ -375,18 +244,18 @@ If the run succeeded cleanly, this file will be empty or will only contain stand
 
 ## Hands-On Verification Challenges
 
-1. **GPU Isolation Verification:**  
+1. **GPU Isolation Verification:**
    Modify `submit_gpu.slurm` to query `nvidia-smi` inside the container:
    ```bash
    srun singularity exec --nv ${SIF_IMAGE} nvidia-smi
    ```
    *Question: How many GPUs does `nvidia-smi` report inside the container when requesting `--gpus=1` on an 8-GPU node?*
 
-2. **Benchmarking CPU vs GPU Execution:**  
-   Temporarily remove the `--nv` flag from your execution command in `submit_gpu.slurm` and resubmit.  
+2. **Benchmarking CPU vs GPU Execution:**
+   Temporarily remove the `--nv` flag from your execution command in `submit_gpu.slurm` and resubmit.
    *Question: At what line does `train_benchmark.py` fail, and what error is recorded in `slurm-<JOB_ID>.err`?*
 
-3. **Tracking Live Output:**  
+3. **Tracking Live Output:**
    Submit a job and monitor the output stream in real-time as it executes on the compute node:
    ```bash
    sbatch submit_gpu.slurm

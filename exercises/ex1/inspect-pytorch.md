@@ -17,13 +17,10 @@ NVIDIA deep learning images are comprehensive distributions that include the CUD
 
 Shared HPC systems often enforce strict quotas on `$HOME` (e.g., 20–50 GB). To prevent quota exhaustion and I/O bottlenecks, redirect Singularity’s cache and temporary directories to your high-speed scratch space prior to pulling.
 
-```bash
-# Define scratch-backed directories for Singularity cache and temporary build space
-export SINGULARITY_TMPDIR=/ibex/user/$USER/tmpdir
-export SINGULARITY_CACHEDIR=/ibex/user/$USER/cachedir
+The provided [`setup_env.sh`](setup_env.sh) exports `SINGULARITY_TMPDIR` and `SINGULARITY_CACHEDIR` and creates both directories. Source it (rather than executing it) so the variables persist in your shell:
 
-# Ensure target directories exist
-mkdir -p "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
+```bash
+source setup_env.sh
 ```
 
 ---
@@ -146,18 +143,10 @@ singularity exec pytorch_24.08.sif dpkg -l | grep -E "cuda|cudnn|nccl"
 ```
 
 ### 5.3 PyTorch Stack Verification
-Query PyTorch's build parameters directly through Python:
+Query PyTorch's build parameters (version, CUDA, cuDNN, NCCL, supported SM architectures) with [`check_pytorch_build.py`](check_pytorch_build.py):
 
 ```bash
-singularity exec pytorch_24.08.sif python3 -c "
-import torch
-print('=== PyTorch Build Configuration ===')
-print('PyTorch Version :', torch.__version__)
-print('Compiled CUDA   :', torch.version.cuda)
-print('cuDNN Version   :', torch.backends.cudnn.version())
-print('NCCL Version    :', torch.cuda.nccl.version() if hasattr(torch.cuda, 'nccl') else 'N/A')
-print('Supported SMs   :', torch.cuda.get_arch_list())
-"
+singularity exec pytorch_24.08.sif python3 check_pytorch_build.py
 ```
 
 ---

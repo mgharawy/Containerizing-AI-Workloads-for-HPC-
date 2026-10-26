@@ -1,7 +1,7 @@
 # Exercise 3: Image Optimization for AI/ML Containers
 
-**Estimated Duration:** 35 minutes  
-**Prerequisites:** 
+**Estimated Duration:** 35 minutes
+**Prerequisites:**
 * Docker installed on a local development workstation or build node.
 * Basic familiarity with `Dockerfile` syntax and container builds (Exercise 2).
 * Access to Singularity on an HPC cluster or development system.
@@ -24,7 +24,7 @@ In this exercise, you will build both a "naive" AI/ML container and an "optimize
 ## 1. Core Principles of Container Optimization
 
 ### The Layer Mechanism and Whiteout Files
-In Docker/OCI images, each `RUN`, `COPY`, and `ADD` directive commits a new read-only filesystem layer. 
+In Docker/OCI images, each `RUN`, `COPY`, and `ADD` directive commits a new read-only filesystem layer.
 
 ```
 Layer 3: RUN rm -rf /tmp/build-cache   <-- Marks files as hidden (whiteout)
@@ -45,13 +45,9 @@ Multi-stage builds decouple the **build environment** from the **runtime environ
 
 ## 2. Step 1: Build the Unoptimized ("Naive") Image
 
-Create a dedicated directory for testing:
+Run all Docker commands in this exercise from this directory (`exercises/ex3`), which contains the build files.
 
-```bash
-mkdir -p ~/image-optimization-lab && cd ~/image-optimization-lab
-```
-
-### 2.1 The Naive Dockerfile (`Dockerfile.naive`)
+### 2.1 The Naive Dockerfile ([`Dockerfile.naive`](Dockerfile.naive))
 
 Inspect this intentionally unoptimized Dockerfile, which exhibits common anti-patterns:
 * Uses a heavyweight CUDA `devel` image rather than a `runtime` image.
@@ -59,31 +55,6 @@ Inspect this intentionally unoptimized Dockerfile, which exhibits common anti-pa
 * Retains `apt` package indexes in `/var/lib/apt/lists/`.
 * Retains `pip` cache files in `~/.cache/pip`.
 * Installs development compilers permanently into the production container.
-
-```dockerfile
-cat << 'EOF' > Dockerfile.naive
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Anti-pattern 1: Separate RUN commands creating redundant layer overhead
-RUN apt-get update
-RUN apt-get install -y python3 python3-pip python3-dev git build-essential
-
-# Anti-pattern 2: Caching pip wheels internally
-RUN pip3 install --upgrade pip
-
-# Anti-pattern 3: Compiling and installing ML libraries without cache purge
-RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-RUN pip3 install transformers accelerate datasets scipy
-
-# Anti-pattern 4: Retaining apt caches on disk (never purged)
-WORKDIR /app
-COPY . /app
-
-CMD ["python3", "-c", "import torch; print('CUDA Available:', torch.cuda.is_available())"]
-EOF
-```
 
 ### 2.2 Build the Naive Image
 
@@ -97,100 +68,17 @@ docker build -t ml-image:naive -f Dockerfile.naive .
 
 Now design an optimized build that achieves the same runtime capability with minimal footprint.
 
-### 3.1 Create a `.dockerignore` File
+### 3.1 The `.dockerignore` File
 
-Prevent unnecessary local files, caches, and git repositories from entering the Docker build context:
+The provided [`.dockerignore`](.dockerignore) keeps git metadata, Python bytecode caches, notebook checkpoints, and previously built `.sif`/`.tar.gz` artifacts out of the Docker build context.
 
-```bash
-cat << 'EOF' > .dockerignore
-.git
-.gitignore
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.ipynb_checkpoints
-*.sif
-*.tar.gz
-EOF
-```
-
-### 3.2 The Optimized Multi-Stage Dockerfile (`Dockerfile.optimized`)
+### 3.2 The Optimized Multi-Stage Dockerfile ([`Dockerfile.optimized`](Dockerfile.optimized))
 
 This configuration uses:
 1. **Multi-Stage Architecture:** Builder stage compiles and installs into `/opt/venv`; runtime stage imports only the isolated `/opt/venv`.
 2. **Base Slicing:** The runtime stage uses `nvidia/cuda:12.4.1-runtime-ubuntu22.04` instead of `devel`.
 3. **Layer Chaining:** Groups `apt-get update`, installation, and cleanup into a single `RUN` command.
 4. **No Pip Cache:** Enforces `--no-cache-dir`.
-
-```dockerfile
-cat << 'EOF' > Dockerfile.optimized
-# ====================================================================
-# Stage 1: Build Environment (Builder)
-# ====================================================================
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1
-
-# Install build-time dependencies only
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
-    python3-dev \
-    build-essential \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create an isolated virtual environment
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Upgrade packaging tools inside the virtualenv
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
-# Install PyTorch and ML libraries into the virtualenv without cache
-RUN pip install --no-cache-dir \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-RUN pip install --no-cache-dir \
-    transformers \
-    accelerate \
-    datasets \
-    scipy
-
-# Clean unneeded bytecode, static libraries, and test suites from virtualenv
-RUN find /opt/venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
-    find /opt/venv -type f -name "*.pyc" -delete
-
-# ====================================================================
-# Stage 2: Final Production Runtime (Slim)
-# ====================================================================
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PATH="/opt/venv/bin:$PATH"
-
-# Install only minimal runtime requirements (no compilers, no dev headers)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-venv \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# Copy only the compiled virtual environment from the builder stage
-COPY --from=builder /opt/venv /opt/venv
-
-WORKDIR /app
-
-CMD ["python3", "-c", "import torch; print('CUDA Available:', torch.cuda.is_available())"]
-EOF
-```
 
 ### 3.3 Build the Optimized Image
 

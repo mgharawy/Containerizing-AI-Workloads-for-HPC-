@@ -1,0 +1,77 @@
+Bootstrap: docker
+From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+%labels
+    Author WorkshopPresenter
+    Version 1.0.0
+    Description Native Singularity image for PyTorch with CUDA 12.4
+
+%environment
+    # These variables are automatically sourced when the container starts
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PATH=/opt/venv/bin:$PATH
+    export PYTHONUNBUFFERED=1
+    # Prevent PyTorch from allocating all visible CUDA memory immediately
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+%files
+    # Copy host test script into the container rootfs during build
+    # Syntax: <source_host> <destination_container>
+    ./test_workload.py /app/test_workload.py
+
+%post
+    # This section executes as root inside an isolated build chroot
+    export DEBIAN_FRONTEND=noninteractive
+
+    # 1. Install base utilities
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ca-certificates \
+        curl \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+
+    # 2. Setup isolated virtual environment
+    python3 -m venv /opt/venv
+    export PATH="/opt/venv/bin:$PATH"
+
+    # 3. Upgrade pip and build tools
+    pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    # 4. Install CUDA-enabled PyTorch and scientific stack
+    pip install --no-cache-dir \
+        torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+    pip install --no-cache-dir \
+        transformers \
+        datasets \
+        accelerate \
+        scikit-learn
+
+    # 5. Clean up temporary files to minimize SquashFS image size
+    find /opt/venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+    find /opt/venv -type f -name "*.pyc" -delete
+
+%runscript
+    # Executed when running `singularity run <image.sif>`
+    echo "========================================================"
+    echo "  Running Workload inside Native Singularity Container  "
+    echo "========================================================"
+    exec python3 /app/test_workload.py "$@"
+
+%test
+    # Post-build validation: if this exits non-zero, the build fails
+    export PATH="/opt/venv/bin:$PATH"
+    echo "Validating PyTorch and CUDA bindings..."
+    python3 -c "import torch; assert torch.__version__ != '', 'PyTorch missing'"
+    echo "Build validation successful!"
+
+%help
+    This container provides a GPU-ready PyTorch 2.4+ environment.
+    To execute the default workload:
+        singularity run --nv pytorch_lab.sif
+    To launch a bash shell:
+        singularity shell --nv pytorch_lab.sif

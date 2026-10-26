@@ -1,0 +1,64 @@
+# ====================================================================
+# Stage 1: Build Environment (Builder)
+# ====================================================================
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# Install build-time dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create an isolated virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade packaging tools inside the virtualenv
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install PyTorch and ML libraries into the virtualenv without cache
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+RUN pip install --no-cache-dir \
+    transformers \
+    accelerate \
+    datasets \
+    scipy
+
+# Clean unneeded bytecode, static libraries, and test suites from virtualenv
+RUN find /opt/venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
+    find /opt/venv -type f -name "*.pyc" -delete
+
+# ====================================================================
+# Stage 2: Final Production Runtime (Slim)
+# ====================================================================
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PATH="/opt/venv/bin:$PATH"
+
+# Install only minimal runtime requirements (no compilers, no dev headers)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy only the compiled virtual environment from the builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+
+CMD ["python3", "-c", "import torch; print('CUDA Available:', torch.cuda.is_available())"]

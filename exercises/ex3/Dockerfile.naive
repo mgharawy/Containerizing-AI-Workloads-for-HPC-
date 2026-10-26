@@ -1,0 +1,20 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Anti-pattern 1: Separate RUN commands creating redundant layer overhead
+RUN apt-get update
+RUN apt-get install -y python3 python3-pip python3-dev git build-essential
+
+# Anti-pattern 2: Caching pip wheels internally
+RUN pip3 install --upgrade pip
+
+# Anti-pattern 3: Compiling and installing ML libraries without cache purge
+RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+RUN pip3 install transformers accelerate datasets scipy
+
+# Anti-pattern 4: Retaining apt caches on disk (never purged)
+WORKDIR /app
+COPY . /app
+
+CMD ["python3", "-c", "import torch; print('CUDA Available:', torch.cuda.is_available())"]

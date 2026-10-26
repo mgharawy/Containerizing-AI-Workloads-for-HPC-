@@ -72,7 +72,7 @@ Host Node 1                                           Host Node 2
 Under the MPICH ABI Compatibility Initiative, binaries compiled against MPICH can dynamically link against and execute with Intel MPI, MVAPICH2, or Cray MPT without recompilation, provided the ABI major version is compatible.
 
 ### The OpenMPI PMIx Compatibility Rule
-OpenMPI relies heavily on PMIx for wire-level process wire-up. For OpenMPI in Singularity:
+OpenMPI relies heavily on PMIx for process wire-up. For OpenMPI in Singularity:
 * The host Slurm must support `--mpi=pmix` or `--mpi=pmi2`.
 * The PMIx client version inside the container must fall within the backward-compatibility window of the host's PMIx server.
 
@@ -80,176 +80,28 @@ OpenMPI relies heavily on PMIx for wire-level process wire-up. For OpenMPI in Si
 
 ## 3. Step 1: Create the MPI Communication Test Suite
 
-Create a dedicated workspace on high-speed scratch storage:
+Copy the exercise files into a workspace on high-speed scratch storage (run from this directory, `exercises/ex7`):
 
 ```bash
-mkdir -p /ibex/user/$USER/mpi_singularity_lab && cd /ibex/user/$USER/mpi_singularity_lab
+mkdir -p /ibex/user/$USER/mpi_singularity_lab
+cp mpi_ring.c mpi_allreduce.py mpi_stack.def submit_mpi.slurm /ibex/user/$USER/mpi_singularity_lab/
+cd /ibex/user/$USER/mpi_singularity_lab
 ```
 
-### 3.1 C-Based Ring Communication Benchmark (`mpi_ring.c`)
-This program passes a message sequentially through all ranks across all containers, verifying inter-node connectivity and latency:
+### 3.1 C-Based Ring Communication Benchmark ([`mpi_ring.c`](mpi_ring.c))
+This program passes a token sequentially through all ranks across all containers and times the full ring, verifying inter-node connectivity and latency.
 
-```c
-cat << 'EOF' > mpi_ring.c
-#define _GNU_SOURCE
-#include <mpi.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
-    int world_rank, world_size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-
-    char hostname[256];
-    gethostname(hostname, sizeof(hostname));
-
-    printf("[Rank %d of %d] Initialized on host: %s\n", world_rank, world_size, hostname);
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    int token;
-    double start_time = MPI_Wtime();
-
-    if (world_rank == 0) {
-        token = 42;
-        printf("\n>>> [Rank 0] Originating token %d to Rank 1...\n", token);
-        MPI_Send(&token, 1, MPI_INT, (world_rank + 1) % world_size, 0, MPI_COMM_WORLD);
-        MPI_Recv(&token, 1, MPI_INT, world_size - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        printf(">>> [Rank 0] Successfully received token %d back from Rank %d!\n", token, world_size - 1);
-    } else {
-        MPI_Recv(&token, 1, MPI_INT, world_rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        printf("    [Rank %d on %s] Received token %d, forwarding to Rank %d...\n", 
-               world_rank, hostname, token, (world_rank + 1) % world_size);
-        MPI_Send(&token, 1, MPI_INT, (world_rank + 1) % world_size, 0, MPI_COMM_WORLD);
-    }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    double end_time = MPI_Wtime();
-
-    if (world_rank == 0) {
-        printf("\nRing pass completed in %f milliseconds across %d ranks.\n\n", 
-               (end_time - start_time) * 1000.0, world_size);
-    }
-
-    MPI_Finalize();
-    return 0;
-}
-EOF
-```
-
-### 3.2 Python AI/ML AllReduce Test (`mpi_allreduce.py`)
-This script uses `mpi4py` to emulate the gradient-reduction patterns utilized by distributed deep learning engines:
-
-```python
-cat << 'EOF' > mpi_allreduce.py
-import os
-import socket
-import numpy as np
-from mpi4py import MPI
-
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
-host = socket.gethostname()
-
-print(f"Python MPI Rank {rank:02d}/{size:02d} online on {host}")
-comm.Barrier()
-
-# Create a synthetic gradient tensor (1 million floats = 4 MB per rank)
-tensor_size = 1_000_000
-send_data = np.ones(tensor_size, dtype=np.float32) * (rank + 1)
-recv_data = np.zeros(tensor_size, dtype=np.float32)
-
-t_start = MPI.Wtime()
-comm.Allreduce(send_data, recv_data, op=MPI.SUM)
-t_end = MPI.Wtime()
-
-# Expected sum formula: n * (n + 1) / 2
-expected_value = (size * (size + 1)) / 2.0
-is_correct = np.allclose(recv_data[0], expected_value)
-
-comm.Barrier()
-if rank == 0:
-    elapsed_ms = (t_end - t_start) * 1000.0
-    mb_transferred = (tensor_size * 4) / (1024 * 1024)
-    print(f"\n[AllReduce Validation]")
-    print(f"Ranks Participating : {size}")
-    print(f"Tensor Payload Size : {mb_transferred:.2f} MB")
-    print(f"AllReduce Duration  : {elapsed_ms:.2f} ms")
-    print(f"Result Verification : {'PASSED' if is_correct else 'FAILED'}")
-    print(f"Value at Index [0]  : {recv_data[0]} (Expected: {expected_value})\n")
-EOF
-```
+### 3.2 Python AI/ML AllReduce Test ([`mpi_allreduce.py`](mpi_allreduce.py))
+This script uses `mpi4py` to emulate the gradient-reduction patterns used by distributed deep learning engines: each rank contributes a 4 MB tensor to an `Allreduce`, and rank 0 verifies the sum and reports the duration.
 
 ---
 
 ## 4. Step 2: Build an MPI-Enabled Container
 
-We will write a Singularity definition file that compiles OpenMPI with UCX support and configures `mpi4py`.
-
-```singularity
-cat << 'EOF' > mpi_stack.def
-Bootstrap: docker
-From: ubuntu:22.04
-
-%labels
-    Author WorkshopPresenter
-    Description OpenMPI and mpi4py Singularity Stack
-
-%environment
-    export LC_ALL=C.UTF-8
-    export LANG=C.UTF-8
-    export PATH=/opt/openmpi/bin:$PATH
-    export LD_LIBRARY_PATH=/opt/openmpi/lib:$LD_LIBRARY_PATH
-
-%post
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        gfortran \
-        wget \
-        curl \
-        ca-certificates \
-        python3 \
-        python3-pip \
-        python3-dev \
-        libibverbs-dev \
-        libnl-3-200 \
-        libnl-route-3-200 \
-        libnuma1 \
-        git \
-        && rm -rf /var/lib/apt/lists/*
-
-    # 1. Install OpenMPI from source (matches typical cluster OpenMPI 4.1.x)
-    cd /tmp
-    wget https://download.open-mpi.org/release/open-mpi/v4.1/openmpi-4.1.6.tar.gz
-    tar -xzf openmpi-4.1.6.tar.gz
-    cd openmpi-4.1.6
-    ./configure --prefix=/opt/openmpi \
-                --enable-mpi-cxx \
-                --with-pmi \
-                --with-pmix=internal \
-                --without-verbs
-    make -j$(nproc)
-    make install
-    cd / && rm -rf /tmp/openmpi*
-
-    # 2. Configure Environment for Python bindings
-    export PATH=/opt/openmpi/bin:$PATH
-    export LD_LIBRARY_PATH=/opt/openmpi/lib:$LD_LIBRARY_PATH
-
-    # 3. Install Python Dependencies
-    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
-    python3 -m pip install --no-cache-dir numpy
-    MPICC=/opt/openmpi/bin/mpicc python3 -m pip install --no-cache-dir mpi4py
-
-%runscript
-    exec "$@"
-EOF
-```
+The definition file [`mpi_stack.def`](mpi_stack.def) starts from `ubuntu:22.04` and:
+* Installs compilers, Python, and InfiniBand verbs development libraries.
+* Builds OpenMPI 4.1.6 from source into `/opt/openmpi` with PMI support and an internal PMIx (matching typical cluster OpenMPI 4.1.x installations).
+* Installs `numpy` and builds `mpi4py` against the container's `mpicc`.
 
 ### Build the Image
 ```bash
@@ -300,61 +152,12 @@ In modern HPC environments, **Slurm acts as the process manager**. You should **
          └──> Host Node 2 ──> singularity exec mpi_stack.sif ./mpi_ring (Rank 3)
 ```
 
-### 6.1 Create the Slurm Batch Script (`submit_mpi.slurm`)
+### 6.1 The Slurm Batch Script ([`submit_mpi.slurm`](submit_mpi.slurm))
 
-```bash
-cat << 'EOF' > submit_mpi.slurm
-#!/bin/bash
-#SBATCH --job-name=singularity_mpi
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8GB
-#SBATCH --time=00:10:00
-#SBATCH --output=mpi_job_%j.log
-#SBATCH --error=mpi_job_%j.err
-
-echo "=========================================================="
-echo " Starting Singularity MPI Multi-Node Execution"
-echo " Slurm Job ID     : $SLURM_JOB_ID"
-echo " Allocated Nodes  : $SLURM_JOB_NODELIST"
-echo " Total Tasks      : $SLURM_NTASKS (2 nodes x 2 tasks/node)"
-echo "=========================================================="
-
-# 1. Purge conflicting host environment modules
-module purge 2>/dev/null || true
-
-# 2. Set Singularity and Network Environment Variables
-# Prevent OpenMPI from trying to use ssh to launch remote tasks
-export OMPI_MCA_plm=rsh
-export OMPI_MCA_plm_rsh_agent=false
-
-# Specify PMI interface (adjust to 'pmi2' or 'pmix' depending on cluster config)
-MPI_TYPE="pmi2"
-
-# Ensure host-level temporary directory is used
-export SINGULARITY_TMPDIR=/ibex/user/$USER/tmp
-mkdir -p "$SINGULARITY_TMPDIR"
-
-CONTAINER_IMG="/ibex/user/$USER/mpi_singularity_lab/mpi_stack.sif"
-
-echo -e "\n--- Test 1: Running C MPI Ring Benchmark ---"
-srun --mpi=${MPI_TYPE} \
-     singularity exec \
-     --bind /dev/shm \
-     --bind /dev/infiniband \
-     "$CONTAINER_IMG" /app/mpi_ring
-
-echo -e "\n--- Test 2: Running Python AllReduce Benchmark ---"
-srun --mpi=${MPI_TYPE} \
-     singularity exec \
-     --bind /dev/shm \
-     --bind /dev/infiniband \
-     "$CONTAINER_IMG" python3 mpi_allreduce.py
-
-echo -e "\nExecution finished with exit code: $?"
-EOF
-```
+The script requests 2 nodes with 2 tasks each (4 ranks total), then:
+1. Purges conflicting host modules and stops OpenMPI from launching remote tasks over ssh.
+2. Sets the PMI interface (`MPI_TYPE="pmi2"`; change to `pmix` if your cluster requires it).
+3. Runs the C ring benchmark (the `mpi_ring` binary compiled in Step 2) and the Python AllReduce benchmark with `srun --mpi=${MPI_TYPE} singularity exec`, binding `/dev/shm`, `/dev/infiniband`, and the work directory, and starting each rank in the work directory (`--pwd`).
 
 ### 6.2 Submit and Monitor the Job
 
@@ -430,4 +233,3 @@ Execution finished with exit code: 0
 | `All ranks report rank 0 of 1` | `srun` executed the container multiple times as independent serial jobs rather than a coordinated MPI step. | Ensure `--mpi=pmi2` or `--mpi=pmix` is passed to `srun`, and verify that MPI inside the image was compiled with `--with-pmi`. |
 | `UCX ERROR: Transport error: Cannot allocate memory` | Intra-node shared memory pool (`/dev/shm`) exhausted. | Explicitly bind the host shared memory mount: `--bind /dev/shm`. |
 | `mpirun: command not found inside container` | Attempted to use the host MPI model without embedding the launcher binaries. | Use the **Hybrid Model**: invoke `srun` on the host, passing `singularity exec <image> <app_binary>`. |
-

@@ -1,0 +1,4 @@
+torch==2.4.1
+transformers>=4.44.2
+urllib3>=2.2.2      # Explicitly pinned to remediate CVE-2024-37891
+certifi>=2024.7.4   # Explicitly pinned to remediate CVE-2024-39689

@@ -4,7 +4,7 @@
 
 * An NGC PyTorch SIF container (`pytorch_24.08.sif`) or the custom PyTorch container built in prior exercises.
 * High-speed scratch filesystem access (`/ibex/user/$USER`).
-* Completion of Exercise 6 and  7.
+* Completion of Exercises 6 and 7.
 
 ---
 
@@ -55,207 +55,30 @@ Compute Node 1 (Master / Rank 0)             Compute Node 2 (Worker / Rank 1)
 
 ## 2. Step 1: Create the Distributed AI/ML Workload
 
-Create a dedicated workspace directory on high-speed scratch storage:
+Copy the exercise files into a workspace directory on high-speed scratch storage (run from this directory, `exercises/ex8`):
 
 ```bash
-mkdir -p /ibex/user/$USER/multinode_lab && cd /ibex/user/$USER/multinode_lab
+mkdir -p /ibex/user/$USER/multinode_lab
+cp ddp_benchmark.py submit_multinode_ddp.slurm /ibex/user/$USER/multinode_lab/
+cd /ibex/user/$USER/multinode_lab
 ```
 
-### Create `ddp_benchmark.py`
+### The DDP Benchmark ([`ddp_benchmark.py`](ddp_benchmark.py))
 
-This script sets up a synthetic Distributed Data Parallel (DDP) workload, performs inter-GPU tensor reductions, and measures synchronization latency:
-
-```python
-cat << 'EOF' > ddp_benchmark.py
-import os
-import sys
-import time
-import torch
-import torch.distributed as dist
-import torch.nn as nn
-import torch.optim as optim
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-def setup_distributed():
-    """Initializes the distributed process group using NCCL."""
-    # Read environment variables set by the launcher/orchestrator
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        world_size=world_size,
-        rank=rank
-    )
-    return rank, world_size, local_rank
-
-def cleanup():
-    dist.destroy_process_group()
-
-def run_workload():
-    rank, world_size, local_rank = setup_distributed()
-    device = torch.device(f"cuda:{local_rank}")
-
-    if rank == 0:
-        print("=" * 60)
-        print("    PyTorch DDP Multi-Node Distributed Benchmark")
-        print("=" * 60)
-        print(f"Total Distributed World Size : {world_size} ranks")
-        print(f"Communication Backend        : {dist.get_backend()}")
-        print("=" * 60)
-
-    # Barrier synchronization to ensure clean diagnostic printing
-    dist.barrier()
-    time.sleep(rank * 0.05)
-    print(f"[Node: {os.uname().nodename}] Rank {rank:02d}/{world_size:02d} bound to Local GPU {local_rank} ({torch.cuda.get_device_name(device)})")
-    dist.barrier()
-
-    # Define a benchmark neural network
-    model = nn.Sequential(
-        nn.Linear(16384, 8192),
-        nn.ReLU(),
-        nn.Linear(8192, 4096),
-        nn.ReLU(),
-        nn.Linear(4096, 10)
-    ).to(device)
-
-    # Wrap model with DistributedDataParallel
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.01)
-
-    batch_size = 128
-    num_iterations = 50
-    warmup_steps = 10
-
-    if rank == 0:
-        print(f"\nStarting training loop: {num_iterations} iterations (Batch size per GPU: {batch_size})...")
-
-    # Warmup loop
-    for _ in range(warmup_steps):
-        inputs = torch.randn(batch_size, 16384, device=device)
-        targets = torch.randint(0, 10, (batch_size,), device=device)
-        optimizer.zero_grad()
-        loss = criterion(model(inputs), targets)
-        loss.backward()
-        optimizer.step()
-
-    torch.cuda.synchronize()
-    dist.barrier()
-
-    start_time = time.time()
-    for step in range(1, num_iterations + 1):
-        step_start = time.time()
-        inputs = torch.randn(batch_size, 16384, device=device)
-        targets = torch.randint(0, 10, (batch_size,), device=device)
-
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()  # Triggers asynchronous all-reduce of gradients via NCCL
-        optimizer.step()
-
-        torch.cuda.synchronize()
-
-        if rank == 0 and step % 10 == 0:
-            step_latency_ms = (time.time() - step_start) * 1000
-            print(f"Step [{step:02d}/{num_iterations:02d}] - Loss: {loss.item():.4f} - Step Latency: {step_latency_ms:.2f} ms")
-
-    dist.barrier()
-    total_time = time.time() - start_time
-    total_samples = batch_size * world_size * num_iterations
-    throughput = total_samples / total_time
-
-    if rank == 0:
-        print("\n" + "=" * 60)
-        print("                  Benchmark Results")
-        print("=" * 60)
-        print(f"Total Processing Time    : {total_time:.2f} seconds")
-        print(f"Aggregate System Throughput : {throughput:.2f} samples/sec")
-        print(f"Per-GPU Throughput          : {(throughput / world_size):.2f} samples/sec/GPU")
-        print("=" * 60 + "\n")
-
-    cleanup()
-
-if __name__ == "__main__":
-    run_workload()
-EOF
-```
+This script sets up a synthetic Distributed Data Parallel (DDP) workload, performs inter-GPU tensor reductions, and measures synchronization latency. It:
+* Reads `RANK`, `WORLD_SIZE`, and `LOCAL_RANK` from the environment and initializes an NCCL process group.
+* Wraps a three-layer MLP in `DistributedDataParallel`.
+* Runs 10 warmup steps, then 50 timed steps, and has rank 0 report step latency, aggregate throughput, and per-GPU throughput.
 
 ---
 
 ## 3. Step 2: Author the Slurm Multi-Node Batch Script
 
-Create `submit_multinode_ddp.slurm`. This script requests **2 compute nodes** with **2 GPUs each** (a total world size of 4), setting up environment rendezvous before launching Singularity via `srun`.
-
-```bash
-cat << 'EOF' > submit_multinode_ddp.slurm
-#!/bin/bash
-#SBATCH --job-name=singularity-ddp
-#SBATCH --nodes=2                   # Number of physical nodes
-#SBATCH --ntasks-per-node=2         # 1 Slurm task per GPU
-#SBATCH --gpus-per-node=2           # Number of GPUs requested per node
-#SBATCH --cpus-per-task=4           # CPU cores assigned per GPU task
-#SBATCH --mem=32G                   # System memory per node
-#SBATCH --time=00:15:00             # Time limit (15 minutes)
-#SBATCH --output=ddp_%j.log
-#SBATCH --error=ddp_%j.err
-
-# Exit immediately if a command fails
-set -euo pipefail
-
-# 1. Identify Host Network Topology & Rendezvous Target
-# Identify the primary node hostname for torch.distributed TCP rendezvous
-NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
-MASTER_ADDR=${NODES[0]}
-MASTER_PORT=29500
-
-echo "=== Distributed Cluster Layout ==="
-echo "Allocated Nodes : ${NODES[*]}"
-echo "Primary Master  : ${MASTER_ADDR}:${MASTER_PORT}"
-echo "Total Tasks     : ${SLURM_NTASKS}"
-echo "=================================="
-
-# 2. Configure NCCL Optimization & Tuning Variables
-export NCCL_DEBUG=INFO                 # Print NCCL initialization diagnostics
-export NCCL_DEBUG_SUBSYS=INIT,COLL,ENV # Output init, collective, and environment variables
-export NCCL_IB_DISABLE=0               # Enforce InfiniBand utilization (0 = enabled)
-export NCCL_NET_GDR_LEVEL=5            # Enable GPUDirect RDMA across NVLink/InfiniBand
-
-# Identify high-speed network device interfaces (adjust to match cluster, e.g., ib0, mlx5_0, ens3f0)
-# export NCCL_SOCKET_IFNAME=ib0
-
-# 3. Define Container Image Location
-CONTAINER_IMAGE="/ibex/user/$USER/pytorch_24.08.sif"
-
-if [ ! -f "$CONTAINER_IMAGE" ]; then
-    echo "[ERROR] Container image not found at $CONTAINER_IMAGE" >&2
-    exit 1
-fi
-
-# 4. Launch Containerized Distributed Tasks with srun
-# Pass Slurm task environment into each container as PyTorch DDP variables
-srun --export=ALL bash -c "
-    export RANK=\$SLURM_PROCID
-    export WORLD_SIZE=\$SLURM_NTASKS
-    export LOCAL_RANK=\$SLURM_LOCALID
-    export MASTER_ADDR=$MASTER_ADDR
-    export MASTER_PORT=$MASTER_PORT
-
-    singularity exec \
-        --nv \
-        --cleanenv \
-        --bind /dev/shm:/dev/shm \
-        --bind /dev/infiniband:/dev/infiniband \
-        --bind /ibex/user/$USER:/ibex/user/$USER \
-        \"$CONTAINER_IMAGE\" \
-        python3 /ibex/user/$USER/multinode_lab/ddp_benchmark.py
-"
-EOF
-```
+[`submit_multinode_ddp.slurm`](submit_multinode_ddp.slurm) requests **2 compute nodes** with **2 GPUs each** (a total world size of 4), sets up environment rendezvous, and launches Singularity via `srun`. It:
+1. Uses the first allocated node as `MASTER_ADDR` (port `29500`) for the TCP rendezvous.
+2. Sets NCCL debugging and tuning variables (`NCCL_DEBUG`, `NCCL_IB_DISABLE=0`, `NCCL_NET_GDR_LEVEL=5`). Uncomment `NCCL_SOCKET_IFNAME` and set it to match your cluster's high-speed interface.
+3. Checks that the SIF image exists at `CONTAINER_IMAGE`.
+4. Maps each Slurm task's `SLURM_PROCID`, `SLURM_NTASKS`, and `SLURM_LOCALID` to PyTorch's `RANK`, `WORLD_SIZE`, and `LOCAL_RANK`, then runs `ddp_benchmark.py` inside the container.
 
 ### Explaining Critical Slurm & Singularity Parameters
 
@@ -374,7 +197,6 @@ Per-GPU Throughput          : 2622.95 samples/sec/GPU
 ---
 
 ## 8. Hands-On Verification Challenges
-
 
 1. **Evaluate Scaling Efficiency:**
    Modify the script to run on a single node with 2 GPUs, then compare aggregate throughput with the 2-node (4 GPU) run:
